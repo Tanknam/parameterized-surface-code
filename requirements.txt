@@ -1,0 +1,5 @@
+stim==1.15.0
+sinter==1.15.0
+pymatching==2.3.0
+numpy==2.2.6
+stimbposd

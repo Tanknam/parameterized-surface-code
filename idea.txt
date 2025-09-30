@@ -1,0 +1,66 @@
+Project Idea and Progress Narrative
+=================================
+
+Title: Reweighted MWPM (rMWPM) for Per-Qubit Noise Surface Code Benchmarking
+
+Motivation
+----------
+Real devices exhibit spatially non-identical (i.n.i.d.) noise: each qubit has distinct T1/T2 times leading to heterogeneous Pauli error rates. Standard decoders (e.g. plain PyMatching on uniform-weight graphs) assume homogeneous noise or at best only incorporate limited asymmetry. This project explores whether explicitly reweighting matching edges by per-qubit error probabilities (per the rMWPM idea) materially improves logical performance versus a baseline MWPM decoder when fed a detector error model (DEM) derived from a circuit whose noise was overridden with per-qubit Pauli channels.
+
+High-Level Goal
+---------------
+1. Generate rotated/unrotated surface code memory circuits with per-qubit Pauli noise derived from synthetic T1/T2 data.
+2. Scale the overall noise level to target global mean error rates while preserving heterogeneity.
+3. Build an rMWPM decoder that converts each DEM error mechanism to an edge weighted by -log(p).
+4. Integrate the decoder into Sinter for Monte Carlo collection and pseudo-threshold estimation.
+5. Compare i.i.d. vs i.n.i.d. baseline vs i.n.i.d. rMWPM performance.
+
+What Has Been Implemented
+-------------------------
+- Synthetic T1/T2 datasets for distances d=3,5,7 with realistic physical constraints (enforced T2 <= 2*T1) in the notebook.
+- Mapping logic that assigns (T1,T2) pairs to the actual qubit indices present in Stim-generated unrotated memory circuits.
+- Function `pauli_from_t1_t2` approximating per-qubit (px,py,pz) via Pauli-twirled T1/T2 decay formulas.
+- Noise override pipeline: take a Stim generator circuit, replace uniform bulk noise with explicit per-qubit `PAULI_CHANNEL_1` instructions while dropping aggregate depolarizing instructions.
+- Scaling mechanism: compute mean per-qubit total error and multiplicatively scale to reach a requested target while preserving ratios; guard against physical infeasibility (probability sum > 1).
+- `CircuitWithQubitNoise` dataclass storing the transformed circuit plus qubit-specific noise map and convenience stats.
+- rMWPM decoder (`scripts/rmwpm_decoder.py`):
+  * Extract DEM (with optional decomposition) from circuit.
+  * Iterate over flattened graphlike error terms.
+  * Create PyMatching edges with weight = -log(p), boundary edges for single-detector events.
+  * Track stats (edges, boundary edges, detectors, skipped non-graphlike terms).
+  * Pad unused detector indices with dummy boundary edges to align with Stim detector count (fixes packed syndrome column mismatch).
+  * Provide Sinter integration via `SinterRMWPMDecoder` implementing `compile_decoder_for_dem`.
+- Notebook integration: tasks constructed for uniform and non-uniform noise sets; Sinter collection run with `decoders=['pymatching']` (baseline) and `decoders=['rmwpm']` (custom) using `custom_decoders={'rmwpm': create_sinter_rmwpm_decoder()}`.
+- Pseudo-threshold calculation routine performing interpolation where logical-per-round crosses physical p.
+- Comparative plot of pseudo-threshold vs distance for: i.i.d. uniform baseline, i.n.i.d. baseline, i.n.i.d. rMWPM (showing modest improvement of rMWPM over plain PyMatching for non-uniform case).
+
+Key Issues Encountered & Resolved
+---------------------------------
+- Initial Sinter packed syndrome mismatch (decoder expected fewer columns): caused by detectors present in DEM but absent in any edge due to flattening/repeat handling. Resolved by padding missing detector indices with placeholder boundary edges at min_probability.
+- Need to ensure per-qubit noise scaling remained physical; added calculation of maximum safe scaling factor and fallback if needed.
+
+Current Status
+--------------
+Core pipeline functions correctly end-to-end on synthetic datasets. rMWPM improvement is currently small (expected given moderate heterogeneity and mostly uniform measurement / two-qubit noise). Infrastructure is ready for injecting more pronounced non-uniformity or real device data.
+
+Preliminary Observations
+------------------------
+- With modest variance in (px,py,pz), -log(p) weighting rarely changes match outcomes except on ambiguous chains.
+- Denser sampling near the crossing should tighten pseudo-threshold estimates and better expose any advantage.
+
+Next Potential Directions
+-------------------------
+1. Introduce strongly skewed T1/T2 distributions or real calibration data.
+2. Include measurement and gate-dependent asymmetries (separate noise models for ancilla vs data qubits, or for two-qubit gates by pair).
+3. Extend decoder to incorporate correlated error groups (beyond graphlike pairs) via auxiliary nodes or hypergraph decomposition.
+4. Add statistical error bars (Wilson or Clopper-Pearson) to plots for rigorous comparison.
+5. Benchmark runtime overhead of rMWPM vs baseline MWPM.
+6. Automate parameter sweeps and store structured results (e.g., Parquet) for further analysis.
+
+Lessons Learned
+---------------
+- Ensuring contiguity of detector indices is critical when interfacing with PyMatching and Sinter's bit-packing.
+- Small heterogeneity produces correspondingly small decoder gains; need either stronger variance or more sophisticated modeling to see larger effects.
+- Modular separation (noise override vs decoder build) simplifies experimentation and debugging.
+
+End of idea.txt
