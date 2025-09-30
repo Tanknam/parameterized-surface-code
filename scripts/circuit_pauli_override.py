@@ -65,14 +65,19 @@ class CircuitWithQubitNoise:
             max_scaled_total = max(max_scaled_total, scaled_total)
         
         if max_scaled_total > 1.0:
-            # Find the maximum safe scaling factor
-            max_safe_factor = 0.0
+            # Find the maximum safe scaling factor. All qubits must respect the
+            # px + py + pz <= 1 constraint simultaneously, so we must select the
+            # *smallest* safe factor across the ensemble.
+            max_safe_factor = float("inf")
             for qubit, (px, py, pz) in self.qubit_noise_map.items():
                 total = px + py + pz
                 if total > 0:
                     safe_factor = 1.0 / total
-                    max_safe_factor = max(max_safe_factor, safe_factor)
-            
+                    max_safe_factor = min(max_safe_factor, safe_factor)
+
+            if math.isinf(max_safe_factor):
+                raise ValueError("Unable to determine safe scaling factor for circuit noise")
+
             # Use the minimum of requested and maximum safe scaling
             actual_scaling_factor = min(scaling_factor, max_safe_factor * 0.995)  # Larger margin for safety
             
