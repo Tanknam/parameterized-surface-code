@@ -14,7 +14,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
-from typing import List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pymatching
@@ -110,6 +110,14 @@ class RMWPMDecoder:
 
         dem_iterable = dem.flattened()
 
+        edge_buckets: Dict[
+            Tuple[Tuple[int, ...], frozenset[int]], _EdgeBucket
+        ] = {}
+        # When multiple error mechanisms toggle the same detector pair (and
+        # logical payload), we combine them using the odd-parity probability
+        # formula so that the resulting edge reflects the total likelihood of an
+        # odd number of such events.
+
         for inst in dem_iterable:
             if inst.type != "error":
                 continue
@@ -120,7 +128,6 @@ class RMWPMDecoder:
             probability = float(args[0])
             if probability <= 0.0:
                 continue
-            weight = -math.log(max(probability, min_probability))
 
             groups = _extract_groups(inst.targets_copy())
             if not groups:
@@ -130,44 +137,65 @@ class RMWPMDecoder:
                 if len(detectors) == 0:
                     continue
                 detectors_used.update(detectors)
-                fault_id_payload = _fault_ids_payload(fault_ids)
                 if fault_ids:
                     max_fault_id = max(max_fault_id, max(fault_ids))
 
-                try:
-                    if len(detectors) == 1:
-                        matching.add_boundary_edge(
-                            detectors[0],
-                            fault_ids=fault_id_payload,
-                            weight=weight,
-                            error_probability=probability,
-                            merge_strategy="smallest-weight",
-                        )
-                        num_boundary_edges += 1
-                    elif len(detectors) == 2:
-                        matching.add_edge(
-                            detectors[0],
-                            detectors[1],
-                            fault_ids=fault_id_payload,
-                            weight=weight,
-                            error_probability=probability,
-                            merge_strategy="smallest-weight",
-                        )
-                        num_edges += 1
-                    else:
-                        skipped += 1
-                        LOGGER.debug(
-                            "Skipping non-graphlike error with detectors=%s",
-                            detectors,
-                        )
-                except ValueError as exc:  # duplicate edge with disallow strategy
+                if len(detectors) > 2:
                     skipped += 1
-                    LOGGER.debug("Skipping edge: %s", exc)
+                    LOGGER.debug(
+                        "Skipping non-graphlike error with detectors=%s",
+                        detectors,
+                    )
+                    continue
+
+                detectors_key: Tuple[int, ...]
+                if len(detectors) == 2:
+                    detectors_key = tuple(sorted(detectors))
+                else:
+                    detectors_key = (detectors[0],)
+
+                key = (detectors_key, frozenset(fault_ids))
+                bucket = edge_buckets.get(key)
+                if bucket is None:
+                    bucket = _EdgeBucket(
+                        detectors=detectors_key,
+                        fault_ids=set(fault_ids),
+                    )
+                    edge_buckets[key] = bucket
+                bucket.update(probability)
 
         if max_fault_id >= 0:
             matching.ensure_num_fault_ids(max_fault_id + 1)
         else:
             matching.ensure_num_fault_ids(dem.num_observables)
+
+        for bucket in edge_buckets.values():
+            probability = bucket.final_probability()
+            probability = _clamp_probability(probability, min_probability)
+            if probability <= 0.0:
+                continue
+            weight = _probability_to_weight(probability)
+            fault_id_payload = _fault_ids_payload(bucket.fault_ids)
+
+            if len(bucket.detectors) == 1:
+                matching.add_boundary_edge(
+                    bucket.detectors[0],
+                    fault_ids=fault_id_payload,
+                    weight=weight,
+                    error_probability=probability,
+                    merge_strategy="smallest-weight",
+                )
+                num_boundary_edges += 1
+            elif len(bucket.detectors) == 2:
+                matching.add_edge(
+                    bucket.detectors[0],
+                    bucket.detectors[1],
+                    fault_ids=fault_id_payload,
+                    weight=weight,
+                    error_probability=probability,
+                    merge_strategy="smallest-weight",
+                )
+                num_edges += 1
 
         # Ensure the matching graph accounts for detectors that never appear in
         # any error term (e.g., idle rounds in the DEM). PyMatching assumes the
@@ -256,6 +284,29 @@ def _fault_ids_payload(fault_ids: Set[int]) -> Optional[Set[int]]:
         # object hashable for future merges.
         return set(fault_ids)
     return set(fault_ids)
+
+
+@dataclasses.dataclass
+class _EdgeBucket:
+    detectors: Tuple[int, ...]
+    fault_ids: Set[int]
+    _parity_product: float = 1.0
+
+    def update(self, probability: float) -> None:
+        self._parity_product *= 1.0 - 2.0 * probability
+
+    def final_probability(self) -> float:
+        clamped_product = max(-1.0, min(1.0, self._parity_product))
+        return 0.5 - 0.5 * clamped_product
+
+
+def _clamp_probability(probability: float, min_probability: float) -> float:
+    return min(max(probability, min_probability), 1.0 - min_probability)
+
+
+def _probability_to_weight(probability: float) -> float:
+    odds_ratio = (1.0 - probability) / probability
+    return math.log(odds_ratio)
 
 
 class _CompiledRMWPMDecoder(sinter.CompiledDecoder):
