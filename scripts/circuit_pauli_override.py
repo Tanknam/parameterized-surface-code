@@ -155,6 +155,19 @@ class CircuitWithQubitNoise:
         
         return max_safe_factor if max_safe_factor != float('inf') else 1.0
 
+    def get_mean_t1_t2(self, idle_duration_us: float = 1.0) -> T1T2Info:
+        """Return effective mean T1/T2 inferred from the per-qubit noise map."""
+
+        if not self.qubit_noise_map:
+            raise ValueError("No noise data available to estimate T1/T2 values")
+
+        num_qubits = len(self.qubit_noise_map)
+        mean_px = sum(px for px, _, _ in self.qubit_noise_map.values()) / num_qubits
+        mean_py = sum(py for _, py, _ in self.qubit_noise_map.values()) / num_qubits
+        mean_pz = sum(pz for _, _, pz in self.qubit_noise_map.values()) / num_qubits
+
+        return t1_t2_from_pauli(idle_duration_us, mean_px, mean_py, mean_pz)
+
 
 def pauli_from_t1_t2(duration_us: float, t1_us: float, t2_us: float) -> Tuple[float, float, float]:
     """Return (px, py, pz) using the standard Pauli-twirled T1/T2 approximation."""
@@ -170,6 +183,43 @@ def pauli_from_t1_t2(duration_us: float, t1_us: float, t2_us: float) -> Tuple[fl
     py = max(0.0, min(1.0, py))
     pz = max(0.0, min(1.0, pz))
     return (px, py, pz)
+
+
+def t1_t2_from_pauli(duration_us: float, px: float, py: float, pz: float) -> T1T2Info:
+    """Infer effective T1/T2 values from a Pauli channel description."""
+
+    duration = float(duration_us)
+    if duration <= 0:
+        raise ValueError("Duration must be positive to infer T1/T2 values")
+
+    px = float(px)
+    py = float(py)
+    pz = float(pz)
+
+    if px < 0 or py < 0 or pz < 0:
+        raise ValueError("Pauli channel probabilities must be non-negative")
+    if px > 1 or py > 1 or pz > 1:
+        raise ValueError("Pauli channel probabilities must not exceed 1")
+
+    mean_px = 0.5 * (px + py)
+    mean_px = max(0.0, mean_px)
+
+    if mean_px == 0:
+        exp_t1 = 1.0
+        t1 = float("inf")
+    else:
+        exp_t1 = 1.0 - 4.0 * mean_px
+        exp_t1 = min(max(exp_t1, 1e-12), 1.0 - 1e-12)
+        t1 = -duration / math.log(exp_t1)
+
+    exp_t2 = (1.0 + exp_t1 - 4.0 * pz) / 2.0
+    if exp_t2 >= 1.0:
+        t2 = float("inf")
+    else:
+        exp_t2 = min(max(exp_t2, 1e-12), 1.0 - 1e-12)
+        t2 = -duration / math.log(exp_t2)
+
+    return T1T2Info(t1_us=float(t1), t2_us=float(t2))
 
 
 def fix_physical_t1_t1(distance_x_t1t2: List[Tuple[float, float, float]]):
